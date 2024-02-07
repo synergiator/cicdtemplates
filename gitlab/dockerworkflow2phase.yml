@@ -1,0 +1,113 @@
+---
+
+default:
+  tags:
+    - asprunner
+
+stages:
+ - prepare
+ - validate
+ - build
+ - package
+ - test
+ - release
+
+prepare:
+  stage: prepare
+  script:
+    - env
+
+# Lint the Dockerfile, if changed
+hadolint:
+  allow_failure: true
+  variables:
+    HADOLINT_ARGS: "--ignore DL3007 --trusted-registry ${CI_REGISTRY} --trusted-registry docker.io"
+  stage: validate
+  image:
+    name: hadolint/hadolint:latest-debian
+  rules:
+    - changes:
+        - Dockerfile
+  script:
+    - hadolint ${HADOLINT_ARGS} Dockerfile
+
+# reusable template "parent" job, will not be executed directly
+.dockerimage_tpl:
+  variables:
+    DOCKERFILE: "Dockerfile"
+  stage: package
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [ "" ]
+  before_script:
+    - DATE=$(date '+%Y-%m-%d')
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+  script:
+    - echo "The script of $CI_JOB_NAME should override the extended '.kaniko publish'"; exit 1
+
+
+# In the DEV registry, always build a "latest" image
+# If a commit is pushed to the default branch,
+# the resulting image will be available via $CI_REGISTRY_IMAGE:latest,
+dockerimage_dev_latest:
+  extends:
+    - .dockerimage_tpl
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/$DOCKERFILE --destination $CI_REGISTRY_IMAGE:latest --build-arg CITAG=$CI_PIPELINE_ID
+
+# In the DEV registry, always build also a debug image tag
+# If a commit is pushed to the default branch,
+# the resulting image will be available via ${CI_COMMIT_BRANCH}-${DATE}-${CI_PIPELINE_ID}
+dockerimage_dev_debugtag:
+  extends:
+    - .dockerimage_tpl
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/$DOCKERFILE --destination $CI_REGISTRY_IMAGE:${CI_COMMIT_BRANCH}-${DATE}-${CI_PIPELINE_ID} --build-arg CITAG=$CI_PIPELINE_ID
+
+# ^^^ one day, Kaniko will support multiple destinations in one job..
+
+
+# If a new tag is pushed to the repository,
+# the resulting image will be available via $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG.
+dockerimage_dev_tagged:
+  extends:
+    - .dockerimage_tpl
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/$DOCKERFILE --destination $CI_REGISTRY_IMAGE:${CI_COMMIT_TAG} --build-arg CITAG=$CI_PIPELINE_ID
+
+test:
+  image: $CI_REGISTRY_IMAGE:latest
+  script:
+    - echo "CITAG:"
+    - cat /CITAG
+    - echo "implement your test of the freshly created Docker image"
+
+
+# release only tagged image in a manual step
+dockerimage_prod:
+  stage: release
+  when: manual
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [ "" ]
+  only:
+    - tags
+  variables:
+    IMAGE_REGISTRY: $PROD_REGISTRY
+    IMAGE_REGISTRY_USER: $PROD_REGISTRY_USER
+    IMAGE_REGISTRY_SECRET: $PROD_REGISTRY_SECRET
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$PROD_REGISTRY\":{\"username\":\"$PROD_REGISTRY_USER\",\"password\":\"$PROD_REGISTRY_SECRET\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $PROD_REPOSITORY:$CI_COMMIT_TAG
+
+    
+
+
